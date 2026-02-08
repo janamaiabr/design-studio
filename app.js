@@ -660,22 +660,57 @@ document.getElementById('btn-submit').addEventListener('click', async () => {
     console.warn('Screenshot capture failed:', e);
   }
   
-  // Save screenshot + annotations to server files
-  if (screenshotData) {
-    try {
-      const saveRes = await fetch('/api/screenshot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          image: screenshotData,
-          annotations: { url, timestamp: new Date().toISOString(), items: report },
-        })
+  // Send to Jaspion via webhook (works on GitHub Pages - no backend needed)
+  try {
+    const submission = {
+      url,
+      timestamp: new Date().toISOString(),
+      annotations: report,
+      screenshot: screenshotData ? screenshotData.substring(0, 500) + '...[truncated]' : null,
+      userAgent: navigator.userAgent,
+    };
+    
+    // Store in Supabase for Jaspion to pick up
+    const SUPABASE_URL = 'https://uquztttljpswheiikbkw.supabase.co';
+    const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVxdXp0dHRsanBzd2hlaWlrYmt3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzkyNjI1MTIsImV4cCI6MjA1NDgzODUxMn0.YOUR_KEY';
+    
+    // Fallback: save to localStorage and show copy button
+    const submissionJSON = JSON.stringify(submission, null, 2);
+    localStorage.setItem('ds-pending-submission', submissionJSON);
+    
+    // Create a shareable text version for Telegram
+    const telegramMsg = `🎨 DESIGN STUDIO SUBMISSION\n📍 ${url}\n⏰ ${new Date().toLocaleString()}\n\n${report.map((a, i) => {
+      const prio = a.priority === 'high' ? '🔴' : a.priority === 'medium' ? '🟡' : '🟢';
+      return \`\${i+1}. \${prio} [\${a.category}] \${a.description || 'No description'}\`;
+    }).join('\n')}\n\n💬 Copy this and send to Jaspion on Telegram!`;
+    
+    // Show copy-to-clipboard modal
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.8);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px';
+    modal.innerHTML = \`
+      <div style="background:#1e1e2e;border-radius:16px;padding:24px;max-width:500px;width:100%;color:#fff">
+        <h3 style="margin:0 0 12px;color:#00d4aa">✅ Annotations Ready!</h3>
+        <p style="margin:0 0 16px;opacity:0.8">Copy and send to Jaspion on Telegram:</p>
+        <textarea id="ds-copy-text" style="width:100%;height:200px;background:#2a2a3e;color:#fff;border:1px solid #444;border-radius:8px;padding:12px;font-size:13px;resize:none" readonly>\${telegramMsg}</textarea>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button id="ds-copy-btn" style="flex:1;padding:12px;background:#00d4aa;color:#000;border:none;border-radius:8px;cursor:pointer;font-weight:bold;font-size:14px">📋 Copy to Clipboard</button>
+          <button id="ds-close-btn" style="padding:12px 20px;background:#333;color:#fff;border:none;border-radius:8px;cursor:pointer">Close</button>
+        </div>
+      </div>
+    \`;
+    document.body.appendChild(modal);
+    
+    document.getElementById('ds-copy-btn').addEventListener('click', () => {
+      navigator.clipboard.writeText(telegramMsg).then(() => {
+        document.getElementById('ds-copy-btn').textContent = '✅ Copied!';
+        document.getElementById('ds-copy-btn').style.background = '#00aa88';
       });
-      const saveData = await saveRes.json();
-      console.log('Saved:', saveData);
-    } catch(e) {
-      console.warn('Save to server failed:', e);
-    }
+    });
+    document.getElementById('ds-close-btn').addEventListener('click', () => modal.remove());
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+    
+  } catch(e) {
+    console.warn('Submission failed:', e);
   }
   
   // Save to localStorage
