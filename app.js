@@ -1,11 +1,45 @@
 // ═══════════════════════════════════════
-// Jaspion Design Studio - v4 (InVision)
+// Jaspion Design Studio - v5 (Live Editor)
 // ═══════════════════════════════════════
+
+// ── Password Protection ──
+const CORRECT_PW = 'JanaJuli@2026!';
+const pwScreen = document.getElementById('password-screen');
+const pwInput = document.getElementById('pw-input');
+const pwBtn = document.getElementById('pw-btn');
+
+if (localStorage.getItem('ds-authed') === 'true') {
+  pwScreen.style.display = 'none';
+  document.getElementById('top-bar').classList.remove('hidden');
+  document.getElementById('workspace').classList.remove('hidden');
+  document.getElementById('status-bar').classList.remove('hidden');
+  initApp();
+} else {
+  pwBtn.addEventListener('click', tryLogin);
+  pwInput.addEventListener('keydown', e => { if (e.key === 'Enter') tryLogin(); });
+}
+
+function tryLogin() {
+  if (pwInput.value === CORRECT_PW) {
+    localStorage.setItem('ds-authed', 'true');
+    pwScreen.style.display = 'none';
+    document.getElementById('top-bar').classList.remove('hidden');
+    document.getElementById('workspace').classList.remove('hidden');
+    document.getElementById('status-bar').classList.remove('hidden');
+    initApp();
+  } else {
+    pwInput.style.borderColor = '#FF3B30';
+    pwInput.value = '';
+    pwInput.placeholder = 'Wrong password...';
+  }
+}
+
+function initApp() {
 
 const TYPE_ICONS = { change: '✏️', bug: '🐛', add: '➕', remove: '➖', style: '🎨' };
 const PRIORITY_COLORS = { high: '#FF3B30', medium: '#FF9500', low: '#34C759' };
 
-// State
+// ── State ──
 let annotations = JSON.parse(localStorage.getItem('ds-annotations') || '[]');
 let currentTool = 'postit';
 let editingIndex = -1;
@@ -15,9 +49,73 @@ let arrowStart = null;
 let dragTarget = null;
 let dragOffset = { x: 0, y: 0 };
 let annotateMode = true;
+let designMode = false;
 let nextId = annotations.length ? Math.max(...annotations.map(a => a.id || 0)) + 1 : 1;
 
-// Elements
+// ── Design State ──
+// designConfig: { selectors: { "body": { "background-color": "#fff", ... }, ".hero": {...} }, customCSS: "" }
+let designConfig = JSON.parse(localStorage.getItem('ds-design-config') || '{"selectors":{},"customCSS":""}');
+let activeSelector = 'body';
+let hasUnsavedChanges = false;
+
+// ── History (Undo/Redo) ──
+let historyStack = [];
+let historyIndex = -1;
+const MAX_HISTORY = 50;
+
+function pushHistory() {
+  const state = {
+    annotations: JSON.parse(JSON.stringify(annotations)),
+    designConfig: JSON.parse(JSON.stringify(designConfig))
+  };
+  // Remove future states if we're not at the end
+  historyStack = historyStack.slice(0, historyIndex + 1);
+  historyStack.push(state);
+  if (historyStack.length > MAX_HISTORY) historyStack.shift();
+  historyIndex = historyStack.length - 1;
+  updateUndoRedoButtons();
+}
+
+function undo() {
+  if (historyIndex <= 0) return;
+  historyIndex--;
+  restoreHistory();
+}
+
+function redo() {
+  if (historyIndex >= historyStack.length - 1) return;
+  historyIndex++;
+  restoreHistory();
+}
+
+function restoreHistory() {
+  const state = historyStack[historyIndex];
+  annotations = JSON.parse(JSON.stringify(state.annotations));
+  designConfig = JSON.parse(JSON.stringify(state.designConfig));
+  saveState();
+  saveDesignConfig();
+  renderAll();
+  applyDesignToPreview();
+  loadDesignUIFromConfig();
+  updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+  document.getElementById('btn-undo').disabled = historyIndex <= 0;
+  document.getElementById('btn-redo').disabled = historyIndex >= historyStack.length - 1;
+}
+
+// Push initial state
+pushHistory();
+
+document.getElementById('btn-undo').addEventListener('click', undo);
+document.getElementById('btn-redo').addEventListener('click', redo);
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
+});
+
+// ── Elements ──
 const iframe = document.getElementById('preview-iframe');
 const wrapper = document.getElementById('preview-wrapper');
 const postitLayer = document.getElementById('postit-layer');
@@ -32,6 +130,7 @@ const annCountTab = document.getElementById('ann-count-tab');
 const emptyState = document.getElementById('empty-annotations');
 const chromeUrlDisplay = document.getElementById('chrome-url-display');
 const deviceFrame = document.getElementById('device-frame');
+const unsavedIndicator = document.getElementById('unsaved-indicator');
 
 // ── Create click-capture overlay ──
 const clickLayer = document.createElement('div');
@@ -51,7 +150,6 @@ new ResizeObserver(resizeCanvas).observe(wrapper);
 setTimeout(resizeCanvas, 200);
 
 // ── Mode & Tool Selection ──
-// Mode buttons (Browse / Comment)
 document.querySelectorAll('.mode-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const tool = btn.dataset.tool;
@@ -60,13 +158,29 @@ document.querySelectorAll('.mode-btn').forEach(btn => {
 
     if (tool === 'browse') {
       annotateMode = false;
+      designMode = false;
       currentTool = 'browse';
       clickLayer.style.pointerEvents = 'none';
       canvas.style.pointerEvents = 'none';
       statusText.textContent = 'Browse mode — interact with the page';
       statusTool.textContent = 'Browse mode';
+    } else if (tool === 'design') {
+      annotateMode = false;
+      designMode = true;
+      currentTool = 'design';
+      clickLayer.style.pointerEvents = 'none';
+      canvas.style.pointerEvents = 'none';
+      statusText.textContent = 'Design mode — edit visual styles';
+      statusTool.textContent = 'Design mode';
+      // Switch to design tab
+      document.querySelectorAll('.sidebar-tabs .tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      document.querySelector('[data-tab="design"]').classList.add('active');
+      document.getElementById('tab-design').classList.add('active');
+      document.getElementById('sidebar').classList.add('open');
     } else {
       annotateMode = true;
+      designMode = false;
       currentTool = 'postit';
       clickLayer.style.pointerEvents = 'auto';
       canvas.style.pointerEvents = 'none';
@@ -83,23 +197,21 @@ document.querySelectorAll('.tool-btn').forEach(btn => {
     if (tool === 'clear') {
       if (confirm('Clear ALL annotations?')) {
         annotations = [];
+        pushHistory();
         saveState();
         renderAll();
         notify('All annotations cleared');
       }
       return;
     }
-
-    // Activate comment mode
     document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
     document.querySelector('.mode-btn[data-tool="postit"]').classList.add('active');
     annotateMode = true;
+    designMode = false;
     currentTool = tool;
     clickLayer.style.pointerEvents = 'auto';
-
     document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-
     if (tool === 'cloud') {
       canvas.style.pointerEvents = 'auto';
       canvas.style.zIndex = '18';
@@ -118,10 +230,14 @@ function loadUrl(url) {
   if (!url) return;
   if (!url.startsWith('http')) url = 'https://' + url;
   document.getElementById('url-input').value = url;
-  const proxyUrl = `/proxy?url=${encodeURIComponent(url)}`;
-  iframe.src = proxyUrl;
+  iframe.src = url;
   chromeUrlDisplay.textContent = url;
   statusText.textContent = `Loading: ${url}`;
+  // Re-apply design overrides after iframe loads
+  iframe.onload = () => {
+    statusText.textContent = `Loaded: ${url}`;
+    applyDesignToPreview();
+  };
 }
 
 document.getElementById('url-input').addEventListener('keydown', e => {
@@ -130,8 +246,8 @@ document.getElementById('url-input').addEventListener('keydown', e => {
 document.getElementById('btn-load-url').addEventListener('click', () => {
   loadUrl(document.getElementById('url-input').value);
 });
-document.querySelectorAll('.preset').forEach(btn => {
-  btn.addEventListener('click', () => loadUrl(btn.dataset.url));
+document.getElementById('project-select').addEventListener('change', e => {
+  if (e.target.value) loadUrl(e.target.value);
 });
 
 // Device toggles
@@ -164,7 +280,6 @@ document.getElementById('toggle-sidebar').addEventListener('click', () => {
 clickLayer.addEventListener('click', (e) => {
   if (!annotateMode) return;
   if (e.target.closest('.postit') || e.target.closest('.ann-pin')) return;
-
   const rect = wrapper.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const y = e.clientY - rect.top;
@@ -173,45 +288,36 @@ clickLayer.addEventListener('click', (e) => {
 
   if (currentTool === 'postit') {
     const ann = {
-      id: nextId++,
-      type: 'postit',
-      targetX: xPct,
-      targetY: yPct,
+      id: nextId++, type: 'postit',
+      targetX: xPct, targetY: yPct,
       postitX: Math.min(parseFloat(xPct) + 5, 80),
       postitY: Math.max(parseFloat(yPct) - 10, 2),
-      text: '',
-      priority: 'medium',
-      category: 'change',
+      text: '', priority: 'medium', category: 'change',
       timestamp: new Date().toISOString()
     };
     annotations.push(ann);
     editingIndex = annotations.length - 1;
+    pushHistory();
     saveState();
     renderAll();
     openModal(editingIndex);
   }
-
   if (currentTool === 'arrow') {
     if (!arrowStart) {
       arrowStart = { x: xPct, y: yPct };
       statusText.textContent = 'Now click the end point for the arrow';
-      notify('Arrow start set — click end point');
     } else {
       const ann = {
-        id: nextId++,
-        type: 'arrow',
-        startX: arrowStart.x,
-        startY: arrowStart.y,
-        endX: xPct,
-        endY: yPct,
-        text: '',
-        priority: 'medium',
-        category: 'change',
+        id: nextId++, type: 'arrow',
+        startX: arrowStart.x, startY: arrowStart.y,
+        endX: xPct, endY: yPct,
+        text: '', priority: 'medium', category: 'change',
         timestamp: new Date().toISOString()
       };
       annotations.push(ann);
       arrowStart = null;
       editingIndex = annotations.length - 1;
+      pushHistory();
       saveState();
       renderAll();
       openModal(editingIndex);
@@ -219,17 +325,15 @@ clickLayer.addEventListener('click', (e) => {
   }
 });
 
-// ── Cloud Drawing (freehand) on canvas ──
+// ── Cloud Drawing ──
 canvas.addEventListener('mousedown', (e) => {
   if (currentTool !== 'cloud') return;
-  e.preventDefault();
-  e.stopPropagation();
+  e.preventDefault(); e.stopPropagation();
   isDrawingCloud = true;
   cloudPoints = [];
   const rect = canvas.getBoundingClientRect();
   cloudPoints.push({ x: e.clientX - rect.left, y: e.clientY - rect.top });
 });
-
 canvas.addEventListener('mousemove', (e) => {
   if (!isDrawingCloud) return;
   e.preventDefault();
@@ -241,77 +345,30 @@ canvas.addEventListener('mousemove', (e) => {
   ctx.strokeStyle = '#FF3366';
   ctx.lineWidth = 2;
   ctx.setLineDash([6, 4]);
-  cloudPoints.forEach((p, i) => {
-    if (i === 0) ctx.moveTo(p.x, p.y);
-    else ctx.lineTo(p.x, p.y);
-  });
+  cloudPoints.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
   ctx.stroke();
   ctx.setLineDash([]);
 });
-
 canvas.addEventListener('mouseup', (e) => {
-  if (!isDrawingCloud || cloudPoints.length < 5) {
-    isDrawingCloud = false;
-    cloudPoints = [];
-    redrawCanvas();
-    return;
-  }
+  if (!isDrawingCloud || cloudPoints.length < 5) { isDrawingCloud = false; cloudPoints = []; redrawCanvas(); return; }
   isDrawingCloud = false;
-  const w = canvas.width;
-  const h = canvas.height;
-  const pctPoints = cloudPoints.map(p => ({
-    x: (p.x / w * 100).toFixed(2),
-    y: (p.y / h * 100).toFixed(2)
-  }));
+  const w = canvas.width, h = canvas.height;
+  const pctPoints = cloudPoints.map(p => ({ x: (p.x / w * 100).toFixed(2), y: (p.y / h * 100).toFixed(2) }));
   const cx = pctPoints.reduce((s, p) => s + parseFloat(p.x), 0) / pctPoints.length;
   const cy = pctPoints.reduce((s, p) => s + parseFloat(p.y), 0) / pctPoints.length;
   const ann = {
-    id: nextId++,
-    type: 'cloud',
-    points: pctPoints,
-    postitX: Math.min(cx + 10, 75),
-    postitY: Math.max(cy - 10, 2),
-    text: '',
-    priority: 'medium',
-    category: 'change',
+    id: nextId++, type: 'cloud', points: pctPoints,
+    postitX: Math.min(cx + 10, 75), postitY: Math.max(cy - 10, 2),
+    text: '', priority: 'medium', category: 'change',
     timestamp: new Date().toISOString()
   };
   annotations.push(ann);
   editingIndex = annotations.length - 1;
   cloudPoints = [];
+  pushHistory();
   saveState();
   renderAll();
   openModal(editingIndex);
-});
-
-// Touch support
-canvas.addEventListener('touchstart', (e) => {
-  if (currentTool !== 'cloud') return;
-  e.preventDefault();
-  isDrawingCloud = true;
-  cloudPoints = [];
-  const rect = canvas.getBoundingClientRect();
-  const t = e.touches[0];
-  cloudPoints.push({ x: t.clientX - rect.left, y: t.clientY - rect.top });
-});
-canvas.addEventListener('touchmove', (e) => {
-  if (!isDrawingCloud) return;
-  e.preventDefault();
-  const rect = canvas.getBoundingClientRect();
-  const t = e.touches[0];
-  cloudPoints.push({ x: t.clientX - rect.left, y: t.clientY - rect.top });
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  redrawExistingClouds();
-  ctx.beginPath();
-  ctx.strokeStyle = '#FF3366';
-  ctx.lineWidth = 2;
-  ctx.setLineDash([6, 4]);
-  cloudPoints.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
-  ctx.stroke();
-  ctx.setLineDash([]);
-});
-canvas.addEventListener('touchend', () => {
-  canvas.dispatchEvent(new MouseEvent('mouseup'));
 });
 
 // ── Render Everything ──
@@ -329,10 +386,8 @@ function renderAll() {
 
 function renderPostits() {
   postitLayer.innerHTML = '';
-
   annotations.forEach((ann, i) => {
     if (ann.type === 'postit' || ann.type === 'cloud') {
-      // Pin at target location
       if (ann.type === 'postit') {
         const pin = document.createElement('div');
         pin.className = `ann-pin ${ann.priority}`;
@@ -343,14 +398,11 @@ function renderPostits() {
         pin.addEventListener('mousedown', (e) => {
           e.stopPropagation();
           dragTarget = { index: i, el: pin, dragType: 'target' };
-          dragOffset.x = 0;
-          dragOffset.y = 0;
+          dragOffset.x = 0; dragOffset.y = 0;
         });
         pin.addEventListener('dblclick', (e) => { e.stopPropagation(); openModal(i); });
         postitLayer.appendChild(pin);
       }
-
-      // Post-it card
       const postit = document.createElement('div');
       postit.className = `postit ${ann.priority}`;
       postit.style.left = `${ann.postitX}%`;
@@ -374,17 +426,13 @@ function renderPostits() {
       });
       postitLayer.appendChild(postit);
     }
-
-    // Arrow label
     if (ann.type === 'arrow' && ann.text) {
       const midX = (parseFloat(ann.startX) + parseFloat(ann.endX)) / 2;
       const midY = (parseFloat(ann.startY) + parseFloat(ann.endY)) / 2;
       const label = document.createElement('div');
       label.className = `postit arrow-label ${ann.priority}`;
-      label.style.left = `${midX}%`;
-      label.style.top = `${midY}%`;
-      label.style.minWidth = '100px';
-      label.style.transform = 'translate(-50%, -50%)';
+      label.style.left = `${midX}%`; label.style.top = `${midY}%`;
+      label.style.minWidth = '100px'; label.style.transform = 'translate(-50%, -50%)';
       label.innerHTML = `<div class="postit-num">${i + 1}</div><div class="postit-text">${ann.text}</div>`;
       label.addEventListener('dblclick', (e) => { e.stopPropagation(); openModal(i); });
       postitLayer.appendChild(label);
@@ -397,32 +445,26 @@ document.addEventListener('mousemove', (e) => {
   if (!dragTarget) return;
   const wRect = wrapper.getBoundingClientRect();
   const ann = annotations[dragTarget.index];
-
   if (dragTarget.dragType === 'target') {
-    const x = ((e.clientX - wRect.left) / wRect.width * 100);
-    const y = ((e.clientY - wRect.top) / wRect.height * 100);
-    ann.targetX = Math.max(0, Math.min(100, x)).toFixed(2);
-    ann.targetY = Math.max(0, Math.min(100, y)).toFixed(2);
+    ann.targetX = Math.max(0, Math.min(100, (e.clientX - wRect.left) / wRect.width * 100)).toFixed(2);
+    ann.targetY = Math.max(0, Math.min(100, (e.clientY - wRect.top) / wRect.height * 100)).toFixed(2);
     dragTarget.el.style.left = `${ann.targetX}%`;
     dragTarget.el.style.top = `${ann.targetY}%`;
   } else {
-    const x = ((e.clientX - wRect.left - dragOffset.x) / wRect.width * 100);
-    const y = ((e.clientY - wRect.top - dragOffset.y) / wRect.height * 100);
-    ann.postitX = Math.max(0, Math.min(85, x)).toFixed(2);
-    ann.postitY = Math.max(0, Math.min(90, y)).toFixed(2);
+    ann.postitX = Math.max(0, Math.min(85, (e.clientX - wRect.left - dragOffset.x) / wRect.width * 100)).toFixed(2);
+    ann.postitY = Math.max(0, Math.min(90, (e.clientY - wRect.top - dragOffset.y) / wRect.height * 100)).toFixed(2);
     dragTarget.el.style.left = `${ann.postitX}%`;
     dragTarget.el.style.top = `${ann.postitY}%`;
   }
   renderSVG();
 });
 document.addEventListener('mouseup', () => {
-  if (dragTarget) { saveState(); dragTarget = null; }
+  if (dragTarget) { pushHistory(); saveState(); dragTarget = null; }
 });
 
 // Canvas clouds
 function redrawExistingClouds() {
-  const w = canvas.width;
-  const h = canvas.height;
+  const w = canvas.width, h = canvas.height;
   annotations.forEach(ann => {
     if (ann.type === 'cloud' && ann.points) {
       ctx.beginPath();
@@ -430,66 +472,45 @@ function redrawExistingClouds() {
       ctx.lineWidth = 2;
       ctx.setLineDash([6, 4]);
       ann.points.forEach((p, i) => {
-        const px = parseFloat(p.x) / 100 * w;
-        const py = parseFloat(p.y) / 100 * h;
-        if (i === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
+        const px = parseFloat(p.x) / 100 * w, py = parseFloat(p.y) / 100 * h;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       });
-      ctx.closePath();
-      ctx.stroke();
+      ctx.closePath(); ctx.stroke();
       ctx.fillStyle = (PRIORITY_COLORS[ann.priority] || '#FF3366') + '10';
-      ctx.fill();
-      ctx.setLineDash([]);
+      ctx.fill(); ctx.setLineDash([]);
     }
   });
 }
-
-function redrawCanvas() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  redrawExistingClouds();
-}
+function redrawCanvas() { ctx.clearRect(0, 0, canvas.width, canvas.height); redrawExistingClouds(); }
 
 function renderSVG() {
   svgOverlay.innerHTML = '';
-  const w = wrapper.clientWidth;
-  const h = wrapper.clientHeight;
-
+  const w = wrapper.clientWidth, h = wrapper.clientHeight;
   annotations.forEach(ann => {
     if (ann.type === 'postit' && ann.targetX && ann.postitX) {
-      const x1 = parseFloat(ann.targetX) / 100 * w;
-      const y1 = parseFloat(ann.targetY) / 100 * h;
-      const x2 = parseFloat(ann.postitX) / 100 * w + 75;
-      const y2 = parseFloat(ann.postitY) / 100 * h + 15;
+      const x1 = parseFloat(ann.targetX)/100*w, y1 = parseFloat(ann.targetY)/100*h;
+      const x2 = parseFloat(ann.postitX)/100*w+75, y2 = parseFloat(ann.postitY)/100*h+15;
       const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      line.setAttribute('x1', x1); line.setAttribute('y1', y1);
-      line.setAttribute('x2', x2); line.setAttribute('y2', y2);
-      line.setAttribute('stroke', PRIORITY_COLORS[ann.priority] || '#FF3366');
-      line.setAttribute('stroke-width', '1');
-      line.setAttribute('stroke-dasharray', '4,3');
-      line.setAttribute('opacity', '0.4');
-      svgOverlay.appendChild(line);
+      line.setAttribute('x1',x1); line.setAttribute('y1',y1);
+      line.setAttribute('x2',x2); line.setAttribute('y2',y2);
+      line.setAttribute('stroke', PRIORITY_COLORS[ann.priority]||'#FF3366');
+      line.setAttribute('stroke-width','1'); line.setAttribute('stroke-dasharray','4,3');
+      line.setAttribute('opacity','0.4'); svgOverlay.appendChild(line);
     }
-
     if (ann.type === 'arrow') {
-      const x1 = parseFloat(ann.startX) / 100 * w;
-      const y1 = parseFloat(ann.startY) / 100 * h;
-      const x2 = parseFloat(ann.endX) / 100 * w;
-      const y2 = parseFloat(ann.endY) / 100 * h;
+      const x1 = parseFloat(ann.startX)/100*w, y1 = parseFloat(ann.startY)/100*h;
+      const x2 = parseFloat(ann.endX)/100*w, y2 = parseFloat(ann.endY)/100*h;
       const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      line.setAttribute('x1', x1); line.setAttribute('y1', y1);
-      line.setAttribute('x2', x2); line.setAttribute('y2', y2);
-      line.setAttribute('stroke', PRIORITY_COLORS[ann.priority] || '#FF3366');
-      line.setAttribute('stroke-width', '2');
-      svgOverlay.appendChild(line);
-      const dx = x2 - x1, dy = y2 - y1;
-      const len = Math.sqrt(dx * dx + dy * dy);
-      if (len > 10) {
-        const ux = dx / len, uy = dy / len;
-        const ax = x2 - ux * 12, ay = y2 - uy * 12;
-        const px = -uy * 6, py = ux * 6;
-        const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        arrow.setAttribute('points', `${x2},${y2} ${ax + px},${ay + py} ${ax - px},${ay - py}`);
-        arrow.setAttribute('fill', PRIORITY_COLORS[ann.priority] || '#FF3366');
+      line.setAttribute('x1',x1); line.setAttribute('y1',y1);
+      line.setAttribute('x2',x2); line.setAttribute('y2',y2);
+      line.setAttribute('stroke', PRIORITY_COLORS[ann.priority]||'#FF3366');
+      line.setAttribute('stroke-width','2'); svgOverlay.appendChild(line);
+      const dx=x2-x1, dy=y2-y1, len=Math.sqrt(dx*dx+dy*dy);
+      if (len>10) {
+        const ux=dx/len,uy=dy/len,ax=x2-ux*12,ay=y2-uy*12,px=-uy*6,py=ux*6;
+        const arrow = document.createElementNS('http://www.w3.org/2000/svg','polygon');
+        arrow.setAttribute('points',`${x2},${y2} ${ax+px},${ay+py} ${ax-px},${ay-py}`);
+        arrow.setAttribute('fill', PRIORITY_COLORS[ann.priority]||'#FF3366');
         svgOverlay.appendChild(arrow);
       }
     }
@@ -499,24 +520,22 @@ function renderSVG() {
 function renderSidebar() {
   annList.innerHTML = '';
   if (annotations.length === 0) return;
-
   annotations.forEach((ann, i) => {
     const card = document.createElement('div');
-    card.className = `ann-card`;
+    card.className = 'ann-card';
     card.innerHTML = `
-      <div class="ann-number">${i + 1}</div>
+      <div class="ann-number">${i+1}</div>
       <div class="ann-header">
-        <span class="ann-type">${TYPE_ICONS[ann.category] || '✏️'} ${ann.category || 'change'}</span>
+        <span class="ann-type">${TYPE_ICONS[ann.category]||'✏️'} ${ann.category||'change'}</span>
         <span class="ann-priority ${ann.priority}">${ann.priority}</span>
       </div>
-      <div class="ann-body">${ann.text || '<em style="opacity:0.4">No description</em>'}</div>
+      <div class="ann-body">${ann.text||'<em style="opacity:0.4">No description</em>'}</div>
       <button class="ann-delete" data-i="${i}" title="Delete">✕</button>
     `;
     card.addEventListener('click', (e) => {
       if (e.target.classList.contains('ann-delete')) {
         annotations.splice(parseInt(e.target.dataset.i), 1);
-        saveState(); renderAll();
-        return;
+        pushHistory(); saveState(); renderAll(); return;
       }
       openModal(i);
     });
@@ -540,11 +559,10 @@ window.closeModal = function() {
   document.getElementById('edit-modal').classList.remove('show');
   if (editingIndex >= 0 && annotations[editingIndex] && !annotations[editingIndex].text) {
     annotations.splice(editingIndex, 1);
-    saveState(); renderAll();
+    pushHistory(); saveState(); renderAll();
   }
   editingIndex = -1;
 };
-
 window.saveAnnotation = function() {
   if (editingIndex < 0) return;
   annotations[editingIndex].text = document.getElementById('edit-text').value;
@@ -552,31 +570,366 @@ window.saveAnnotation = function() {
   annotations[editingIndex].category = document.getElementById('edit-type').value;
   document.getElementById('edit-modal').classList.remove('show');
   editingIndex = -1;
-  saveState(); renderAll();
+  pushHistory(); saveState(); renderAll();
   notify('Comment saved');
 };
-
 window.deleteAnnotation = function() {
   if (editingIndex < 0) return;
   annotations.splice(editingIndex, 1);
   document.getElementById('edit-modal').classList.remove('show');
   editingIndex = -1;
-  saveState(); renderAll();
+  pushHistory(); saveState(); renderAll();
   notify('Comment deleted');
 };
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeModal();
+// ═══════════════════════════════════════
+// DESIGN EDITOR
+// ═══════════════════════════════════════
+
+// Property map: control ID → CSS property
+const PROPERTY_MAP = {
+  'css-bg-color': 'background-color',
+  'css-text-color': 'color',
+  'css-accent-color': '--accent-color',
+  'css-link-color': '--link-color',
+  'css-border-color': 'border-color',
+  'css-font-family': 'font-family',
+  'css-font-size': { prop: 'font-size', unit: 'px' },
+  'css-font-weight': 'font-weight',
+  'css-line-height': 'line-height',
+  'css-letter-spacing': { prop: 'letter-spacing', unit: 'px' },
+  'css-text-transform': 'text-transform',
+  'css-padding': { prop: 'padding', unit: 'px' },
+  'css-padding-top': { prop: 'padding-top', unit: 'px' },
+  'css-padding-bottom': { prop: 'padding-bottom', unit: 'px' },
+  'css-margin': { prop: 'margin', unit: 'px' },
+  'css-gap': { prop: 'gap', unit: 'px' },
+  'css-border-radius': { prop: 'border-radius', unit: 'px' },
+  'css-border-width': { prop: 'border-width', unit: 'px' },
+  'css-box-shadow': 'box-shadow',
+  'css-opacity': 'opacity',
+  'css-display': 'display',
+  'css-flex-direction': 'flex-direction',
+  'css-justify-content': 'justify-content',
+  'css-align-items': 'align-items',
+  'css-text-align': 'text-align',
+  'css-max-width': 'max-width',
+};
+
+// Selector management
+function renderSelectorChips() {
+  const container = document.getElementById('selector-chips');
+  container.innerHTML = '';
+  const selectors = Object.keys(designConfig.selectors);
+  if (selectors.length === 0 && activeSelector) {
+    designConfig.selectors[activeSelector] = designConfig.selectors[activeSelector] || {};
+  }
+  const allSelectors = [...new Set([...selectors, activeSelector])];
+  allSelectors.forEach(sel => {
+    const chip = document.createElement('span');
+    chip.className = `chip ${sel === activeSelector ? 'active' : ''}`;
+    const propCount = Object.keys(designConfig.selectors[sel] || {}).length;
+    chip.innerHTML = `${sel}${propCount ? ` <small>(${propCount})</small>` : ''}`;
+    chip.addEventListener('click', () => {
+      activeSelector = sel;
+      document.getElementById('css-selector').value = sel;
+      renderSelectorChips();
+      loadDesignUIFromConfig();
+    });
+    // Right click to remove
+    chip.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (confirm(`Remove selector "${sel}" and its overrides?`)) {
+        delete designConfig.selectors[sel];
+        if (activeSelector === sel) activeSelector = Object.keys(designConfig.selectors)[0] || 'body';
+        pushHistory(); saveDesignConfig(); renderSelectorChips(); loadDesignUIFromConfig(); applyDesignToPreview();
+      }
+    });
+    container.appendChild(chip);
+  });
+}
+
+document.getElementById('btn-add-selector').addEventListener('click', () => {
+  const sel = document.getElementById('css-selector').value.trim();
+  if (!sel) return;
+  activeSelector = sel;
+  if (!designConfig.selectors[sel]) designConfig.selectors[sel] = {};
+  renderSelectorChips();
+  loadDesignUIFromConfig();
+  notify(`Selector "${sel}" active`);
 });
 
-// ── Gateway Config ──
-const GATEWAY_TOKEN = localStorage.getItem('ds-gw-token') || '';
-const CHAT_API = '/api/chat';
+document.getElementById('css-selector').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('btn-add-selector').click();
+});
 
-// ── Chat ──
+// Collapsible sections
+document.querySelectorAll('.design-section-header[data-collapse]').forEach(header => {
+  header.addEventListener('click', () => {
+    const body = document.getElementById(header.dataset.collapse);
+    body.classList.toggle('collapsed');
+    header.querySelector('.collapse-arrow').textContent = body.classList.contains('collapsed') ? '▸' : '▾';
+  });
+});
+
+// Wire up all design controls
+function wireDesignControls() {
+  // Color pickers sync with text inputs
+  ['bg-color', 'text-color', 'accent-color', 'link-color', 'border-color'].forEach(name => {
+    const picker = document.getElementById(`css-${name}`);
+    const text = document.getElementById(`css-${name}-text`);
+    picker.addEventListener('input', () => {
+      text.value = picker.value;
+      onDesignChange(`css-${name}`, picker.value);
+    });
+    text.addEventListener('change', () => {
+      if (text.value.match(/^#[0-9a-f]{3,8}$/i)) picker.value = text.value;
+      onDesignChange(`css-${name}`, text.value);
+    });
+  });
+
+  // Range sliders
+  ['font-size', 'line-height', 'letter-spacing', 'padding', 'padding-top', 'padding-bottom', 'margin', 'gap', 'border-radius', 'border-width', 'opacity'].forEach(name => {
+    const range = document.getElementById(`css-${name}`);
+    const valSpan = document.getElementById(`css-${name}-val`);
+    range.addEventListener('input', () => {
+      const mapping = PROPERTY_MAP[`css-${name}`];
+      const unit = (typeof mapping === 'object' && mapping.unit) ? mapping.unit : '';
+      valSpan.textContent = range.value + unit;
+      onDesignChange(`css-${name}`, range.value);
+    });
+  });
+
+  // Selects
+  ['font-family', 'font-weight', 'text-transform', 'box-shadow', 'display', 'flex-direction', 'justify-content', 'align-items', 'text-align'].forEach(name => {
+    const select = document.getElementById(`css-${name}`);
+    select.addEventListener('change', () => onDesignChange(`css-${name}`, select.value));
+  });
+
+  // Text inputs
+  ['max-width'].forEach(name => {
+    const input = document.getElementById(`css-${name}`);
+    input.addEventListener('change', () => onDesignChange(`css-${name}`, input.value));
+  });
+
+  // Custom font
+  document.getElementById('css-font-custom').addEventListener('change', (e) => {
+    if (e.target.value) {
+      onDesignChange('css-font-family', e.target.value);
+      document.getElementById('css-font-family').value = '';
+    }
+  });
+
+  // Custom CSS
+  document.getElementById('btn-apply-custom').addEventListener('click', () => {
+    designConfig.customCSS = document.getElementById('css-custom-raw').value;
+    pushHistory(); saveDesignConfig(); applyDesignToPreview();
+    markUnsaved();
+    notify('Custom CSS applied');
+  });
+}
+
+function onDesignChange(controlId, value) {
+  const mapping = PROPERTY_MAP[controlId];
+  if (!mapping) return;
+
+  const cssProp = typeof mapping === 'object' ? mapping.prop : mapping;
+  const unit = typeof mapping === 'object' ? (mapping.unit || '') : '';
+
+  if (!designConfig.selectors[activeSelector]) designConfig.selectors[activeSelector] = {};
+
+  if (value === '' || value === undefined || value === null) {
+    delete designConfig.selectors[activeSelector][cssProp];
+  } else {
+    // For range values, add unit
+    const needsUnit = unit && !String(value).includes(unit) && !String(value).includes('%');
+    designConfig.selectors[activeSelector][cssProp] = needsUnit ? value + unit : value;
+  }
+
+  // Special: link-color and accent-color apply to specific selectors
+  if (controlId === 'css-link-color' && value) {
+    if (!designConfig.selectors['a']) designConfig.selectors['a'] = {};
+    designConfig.selectors['a']['color'] = value;
+  }
+  if (controlId === 'css-accent-color' && value) {
+    // Store as CSS variable on root
+    if (!designConfig.selectors[':root']) designConfig.selectors[':root'] = {};
+    designConfig.selectors[':root']['--accent-color'] = value;
+  }
+
+  pushHistory();
+  saveDesignConfig();
+  applyDesignToPreview();
+  renderSelectorChips();
+  markUnsaved();
+}
+
+function loadDesignUIFromConfig() {
+  const props = designConfig.selectors[activeSelector] || {};
+
+  // Colors
+  ['bg-color|background-color', 'text-color|color', 'border-color|border-color'].forEach(pair => {
+    const [name, cssProp] = pair.split('|');
+    const val = props[cssProp] || '';
+    const picker = document.getElementById(`css-${name}`);
+    const text = document.getElementById(`css-${name}-text`);
+    if (val && val.match(/^#/)) picker.value = val;
+    text.value = val;
+  });
+
+  // Accent from :root
+  const accentVal = (designConfig.selectors[':root'] || {})['--accent-color'] || '';
+  document.getElementById('css-accent-color-text').value = accentVal;
+  if (accentVal.match(/^#/)) document.getElementById('css-accent-color').value = accentVal;
+
+  // Link from a
+  const linkVal = (designConfig.selectors['a'] || {})['color'] || '';
+  document.getElementById('css-link-color-text').value = linkVal;
+  if (linkVal.match(/^#/)) document.getElementById('css-link-color').value = linkVal;
+
+  // Ranges
+  const rangeMap = {
+    'font-size': ['font-size', 'px', '16'],
+    'line-height': ['line-height', '', '1.5'],
+    'letter-spacing': ['letter-spacing', 'px', '0'],
+    'padding': ['padding', 'px', '0'],
+    'padding-top': ['padding-top', 'px', '0'],
+    'padding-bottom': ['padding-bottom', 'px', '0'],
+    'margin': ['margin', 'px', '0'],
+    'gap': ['gap', 'px', '0'],
+    'border-radius': ['border-radius', 'px', '0'],
+    'border-width': ['border-width', 'px', '0'],
+    'opacity': ['opacity', '', '1'],
+  };
+  Object.entries(rangeMap).forEach(([name, [cssProp, unit, def]]) => {
+    const val = props[cssProp] || '';
+    const numVal = val ? parseFloat(val) : parseFloat(def);
+    document.getElementById(`css-${name}`).value = numVal;
+    document.getElementById(`css-${name}-val`).textContent = numVal + unit;
+  });
+
+  // Selects
+  ['font-family', 'font-weight', 'text-transform', 'box-shadow', 'display', 'flex-direction', 'justify-content', 'align-items', 'text-align'].forEach(name => {
+    const cssProp = (typeof PROPERTY_MAP[`css-${name}`] === 'object') ? PROPERTY_MAP[`css-${name}`].prop : PROPERTY_MAP[`css-${name}`];
+    document.getElementById(`css-${name}`).value = props[cssProp] || '';
+  });
+
+  // Text inputs
+  document.getElementById('css-max-width').value = props['max-width'] || '';
+  document.getElementById('css-custom-raw').value = designConfig.customCSS || '';
+}
+
+// ── Generate CSS from config ──
+function generateCSS() {
+  let css = '/* Generated by Jaspion Design Studio */\n/* ' + new Date().toISOString() + ' */\n\n';
+
+  Object.entries(designConfig.selectors).forEach(([selector, props]) => {
+    const entries = Object.entries(props).filter(([,v]) => v !== '' && v !== undefined);
+    if (entries.length === 0) return;
+    css += `${selector} {\n`;
+    entries.forEach(([prop, val]) => {
+      css += `  ${prop}: ${val} !important;\n`;
+    });
+    css += '}\n\n';
+  });
+
+  if (designConfig.customCSS) {
+    css += '/* Custom CSS */\n' + designConfig.customCSS + '\n';
+  }
+
+  return css;
+}
+
+// ── Apply design to iframe ──
+function applyDesignToPreview() {
+  const css = generateCSS();
+  try {
+    // Try same-origin access
+    const doc = iframe.contentDocument || iframe.contentWindow.document;
+    let styleEl = doc.getElementById('jaspion-design-overrides');
+    if (!styleEl) {
+      styleEl = doc.createElement('style');
+      styleEl.id = 'jaspion-design-overrides';
+      doc.head.appendChild(styleEl);
+    }
+    styleEl.textContent = css;
+  } catch(e) {
+    // Cross-origin: use postMessage approach
+    // The CSS is still generated and can be exported
+    console.log('Cross-origin iframe — CSS generated for export. Preview limited.');
+    statusText.textContent = 'Cross-origin: CSS generated for export (preview limited)';
+  }
+}
+
+// ── Export Functions ──
+document.getElementById('btn-copy-css').addEventListener('click', () => {
+  const css = generateCSS();
+  navigator.clipboard.writeText(css).then(() => {
+    notify('CSS copied to clipboard!');
+    document.getElementById('btn-copy-css').innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Copied!`;
+    setTimeout(() => {
+      document.getElementById('btn-copy-css').innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy CSS`;
+    }, 2000);
+  });
+});
+
+document.getElementById('btn-download-css').addEventListener('click', () => {
+  const css = generateCSS();
+  const blob = new Blob([css], { type: 'text/css' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'design-overrides.css';
+  a.click();
+  notify('CSS file downloaded');
+  markSaved();
+});
+
+document.getElementById('btn-reset-design').addEventListener('click', () => {
+  if (!confirm('Reset ALL design changes? This cannot be undone.')) return;
+  designConfig = { selectors: {}, customCSS: '' };
+  activeSelector = 'body';
+  pushHistory();
+  saveDesignConfig();
+  applyDesignToPreview();
+  loadDesignUIFromConfig();
+  renderSelectorChips();
+  markSaved();
+  notify('Design reset to defaults');
+});
+
+// ── Unsaved indicator ──
+function markUnsaved() {
+  hasUnsavedChanges = true;
+  unsavedIndicator.classList.remove('hidden');
+}
+function markSaved() {
+  hasUnsavedChanges = false;
+  unsavedIndicator.classList.add('hidden');
+}
+
+// ── Persistence ──
+function saveState() {
+  localStorage.setItem('ds-annotations', JSON.stringify(annotations));
+}
+function saveDesignConfig() {
+  localStorage.setItem('ds-design-config', JSON.stringify(designConfig));
+}
+
+// ── Tabs ──
+document.querySelectorAll('.sidebar-tabs .tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.sidebar-tabs .tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+  });
+});
+
+// ── Chat (kept from v4) ──
+const GATEWAY_TOKEN = localStorage.getItem('ds-gw-token') || '';
 const chatMessages = document.getElementById('chat-messages');
 const chatInput = document.getElementById('chat-input');
-const chatSend = document.getElementById('chat-send');
 
 function addChatBubble(text, role) {
   const bubble = document.createElement('div');
@@ -593,7 +946,7 @@ async function sendChat(text) {
   chatInput.value = '';
   const thinking = addChatBubble('Thinking...', 'assistant');
   try {
-    const res = await fetch(CHAT_API, {
+    const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-GW-Token': GATEWAY_TOKEN },
       body: JSON.stringify({ model: 'openclaw', messages: [{ role: 'user', content: text }], stream: false })
@@ -603,11 +956,9 @@ async function sendChat(text) {
     thinking.textContent = data.choices?.[0]?.message?.content || 'No response';
   } catch(e) {
     thinking.textContent = `Error: ${e.message}`;
-    thinking.style.borderColor = 'var(--high)';
   }
 }
 
-// Token setup
 if (!GATEWAY_TOKEN) {
   const setupDiv = document.createElement('div');
   setupDiv.style.cssText = 'padding:20px;text-align:center;';
@@ -621,22 +972,19 @@ if (!GATEWAY_TOKEN) {
   `;
   chatMessages.appendChild(setupDiv);
   setTimeout(() => {
-    document.getElementById('token-save').addEventListener('click', () => {
+    document.getElementById('token-save')?.addEventListener('click', () => {
       const t = document.getElementById('token-input').value.trim();
       if (t) { localStorage.setItem('ds-gw-token', t); location.reload(); }
-    });
-    document.getElementById('token-input').addEventListener('keydown', e => {
-      if (e.key === 'Enter') document.getElementById('token-save').click();
     });
   }, 50);
 }
 
-chatSend.addEventListener('click', () => sendChat(chatInput.value));
+document.getElementById('chat-send').addEventListener('click', () => sendChat(chatInput.value));
 chatInput.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(chatInput.value); }
 });
 
-// ── Export Functions ──
+// ── Annotation Export ──
 function exportJSON() {
   const url = document.getElementById('url-input').value || 'N/A';
   const data = { url, timestamp: new Date().toISOString(), annotations: annotations.map((a, i) => ({ number: i+1, type: a.type, category: a.category, priority: a.priority, description: a.text })) };
@@ -647,7 +995,6 @@ function exportJSON() {
   a.click();
   notify('Exported as JSON');
 }
-
 function exportMarkdown() {
   const url = document.getElementById('url-input').value || 'N/A';
   let md = `# Design Annotations\n\n**URL:** ${url}\n**Date:** ${new Date().toLocaleString()}\n\n`;
@@ -662,33 +1009,14 @@ function exportMarkdown() {
   a.click();
   notify('Exported as Markdown');
 }
-
 document.getElementById('btn-export-json').addEventListener('click', exportJSON);
 document.getElementById('btn-export-md').addEventListener('click', exportMarkdown);
 
-// ── Submit ──
+// ── Submit to Jaspion ──
 document.getElementById('btn-submit').addEventListener('click', async () => {
   if (annotations.length === 0) { notify('No annotations to submit'); return; }
-
   const url = document.getElementById('url-input').value || 'N/A';
-  const report = annotations.map((a, i) => ({
-    number: i + 1, type: a.type, category: a.category,
-    priority: a.priority, description: a.text,
-  }));
-
-  statusText.textContent = 'Capturing screenshot...';
-
-  let screenshotData = null;
-  try {
-    const captureArea = wrapper;
-    const c = await html2canvas(captureArea, {
-      backgroundColor: '#F5F5F7',
-      scale: 1, useCORS: true, allowTaint: true, logging: false,
-    });
-    screenshotData = c.toDataURL('image/png');
-  } catch(e) { console.warn('Screenshot failed:', e); }
-
-  // Copy modal
+  const report = annotations.map((a, i) => ({ number: i+1, type: a.type, category: a.category, priority: a.priority, description: a.text }));
   const telegramMsg = `🎨 DESIGN STUDIO SUBMISSION\n📍 ${url}\n⏰ ${new Date().toLocaleString()}\n\n${report.map((a, i) => {
     const prio = a.priority === 'high' ? '🔴' : a.priority === 'medium' ? '🟡' : '🟢';
     return `${i+1}. ${prio} [${a.category}] ${a.description || 'No description'}`;
@@ -700,63 +1028,24 @@ document.getElementById('btn-submit').addEventListener('click', async () => {
     <div style="background:white;border-radius:12px;padding:24px;max-width:500px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,0.16)">
       <h3 style="margin:0 0 4px;font-size:16px;font-weight:600">Annotations Ready</h3>
       <p style="margin:0 0 16px;color:#8E8E93;font-size:13px">Copy and send to Jaspion</p>
-      <textarea id="ds-copy-text" style="width:100%;height:180px;background:#F5F5F7;color:#1C1C1E;border:1px solid #E5E5EA;border-radius:8px;padding:12px;font-size:12px;resize:none;font-family:var(--font)" readonly>${telegramMsg}</textarea>
+      <textarea style="width:100%;height:180px;background:#F5F5F7;color:#1C1C1E;border:1px solid #E5E5EA;border-radius:8px;padding:12px;font-size:12px;resize:none;font-family:var(--font)" readonly>${telegramMsg}</textarea>
       <div style="display:flex;gap:8px;margin-top:12px">
-        <button id="ds-copy-btn" style="flex:1;padding:10px;background:#FF3366;color:white;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;font-family:var(--font)">Copy to Clipboard</button>
-        <button id="ds-close-btn" style="padding:10px 20px;background:#F0F0F2;color:#636366;border:none;border-radius:8px;cursor:pointer;font-size:13px;font-family:var(--font)">Close</button>
+        <button id="ds-copy-btn2" style="flex:1;padding:10px;background:#FF3366;color:white;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px">Copy to Clipboard</button>
+        <button id="ds-close-btn2" style="padding:10px 20px;background:#F0F0F2;color:#636366;border:none;border-radius:8px;cursor:pointer;font-size:13px">Close</button>
       </div>
     </div>
   `;
   document.body.appendChild(modal);
-  document.getElementById('ds-copy-btn').addEventListener('click', () => {
-    navigator.clipboard.writeText(telegramMsg).then(() => {
-      document.getElementById('ds-copy-btn').textContent = '✓ Copied!';
-    });
+  document.getElementById('ds-copy-btn2').addEventListener('click', () => {
+    navigator.clipboard.writeText(telegramMsg).then(() => { document.getElementById('ds-copy-btn2').textContent = '✓ Copied!'; });
   });
-  document.getElementById('ds-close-btn').addEventListener('click', () => modal.remove());
+  document.getElementById('ds-close-btn2').addEventListener('click', () => modal.remove());
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
-
-  localStorage.setItem('ds-last-submission', JSON.stringify({ url, timestamp: new Date().toISOString(), annotations: report }, null, 2));
-
-  // Send to chat
-  document.querySelector('[data-tab="chat"]').click();
-  const screenshotNote = screenshotData ? '\n\n📸 Screenshot captured.' : '';
-  const chatMsg = `📋 Design annotations for ${url}:\n\n${report.map((a, i) => {
-    const prio = a.priority === 'high' ? '🔴' : a.priority === 'medium' ? '🟡' : '🟢';
-    return `${i+1}. ${prio} [${a.category}] ${a.description || 'No description'}`;
-  }).join('\n')}\n\nPlease implement these changes.${screenshotNote}`;
-  await sendChat(chatMsg);
-  statusText.textContent = `✓ ${annotations.length} annotations sent to Jaspion`;
-  notify('Annotations sent!');
 });
-
-// ── Tabs ──
-document.querySelectorAll('.sidebar-tabs .tab-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.sidebar-tabs .tab-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
-  });
-});
-
-// ── Helpers ──
-function saveState() {
-  localStorage.setItem('ds-annotations', JSON.stringify(annotations));
-}
-
-function notify(msg) {
-  const el = document.createElement('div');
-  el.className = 'notification';
-  el.textContent = msg;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 3000);
-}
 
 // ── Drag & Drop Image Upload ──
 document.getElementById('preview-area').addEventListener('dragover', (e) => {
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'copy';
+  e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
 });
 document.getElementById('preview-area').addEventListener('drop', (e) => {
   e.preventDefault();
@@ -770,12 +1059,38 @@ document.getElementById('preview-area').addEventListener('drop', (e) => {
       wrapper.style.backgroundRepeat = 'no-repeat';
       wrapper.style.backgroundPosition = 'center';
       chromeUrlDisplay.textContent = file.name;
-      statusText.textContent = `Image loaded: ${file.name}`;
       notify('Image loaded');
     };
     reader.readAsDataURL(file);
   }
 });
 
+// ── Notify ──
+function notify(msg) {
+  const el = document.createElement('div');
+  el.className = 'notification';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
 // ── Init ──
+wireDesignControls();
+renderSelectorChips();
+loadDesignUIFromConfig();
 renderAll();
+
+// Re-apply design when iframe loads
+iframe.addEventListener('load', () => {
+  setTimeout(() => applyDesignToPreview(), 300);
+});
+
+// Warn on unload if unsaved
+window.addEventListener('beforeunload', (e) => {
+  if (hasUnsavedChanges) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
+} // end initApp
